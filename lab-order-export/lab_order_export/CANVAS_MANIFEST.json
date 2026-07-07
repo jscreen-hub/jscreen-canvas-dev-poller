@@ -2,12 +2,17 @@
     "sdk_version": "0.1.4",
     "plugin_version": "0.0.1",
     "name": "lab_order_export",
-    "description": "Edit the description in CANVAS_MANIFEST.json",
+    "description": "Exports every committed lab and genetic test order to an external HTTP API and a local NDJSON audit file when a provider signs the Lab Order command.",
     "components": {
         "handlers": [
             {
-                "class": "lab_order_export.handlers.event_handlers:NewOfficeVisitNoteHandler",
-                "description": "A handler that listens for an event and sets an inspirational goal."
+                "class": "lab_order_export.handlers.order_export:OrderExportHandler",
+                "description": "On lab order commit, builds a structured order payload and delivers it to the configured external API and NDJSON audit file.",
+                "data_access": {
+                    "event": "",
+                    "read": [],
+                    "write": []
+                }
             }
         ],
         "commands": [],
@@ -15,7 +20,11 @@
         "effects": [],
         "views": []
     },
-    "variables": [],
+    "variables": [
+        {"name": "ORDER_EXPORT_API_URL", "sensitive": false},
+        {"name": "ORDER_EXPORT_API_TOKEN", "sensitive": true},
+        {"name": "ORDER_EXPORT_FILE_PATH", "sensitive": false}
+    ],
     "tags": {},
     "references": [],
     "license": "",

@@ -20,7 +20,17 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 python_files = ["*_tests.py", "test_*.py", "tests.py"]
+python_functions = ["test_*"]
 
 [tool.coverage.run]
-omit = ["tests/*"]
+source = ["lab_order_export"]
+omit = ["tests/*", "*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+omit = ["tests/*", "*/tests/*"]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]

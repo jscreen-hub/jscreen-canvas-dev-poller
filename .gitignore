@@ -1,0 +1,22 @@
+# Secrets / credentials — never commit
+.env
+.env.*
+*.local.json
+settings.json.local.json
+
+# Patient order data pulled from Canvas (PHI) — never commit
+/orders/
+
+# Local tooling / editor state
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# CPA workflow artifacts live inside the plugin dir, not the repo root

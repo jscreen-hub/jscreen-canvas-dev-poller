@@ -89,7 +89,10 @@ class CanvasClient:
                 resource = entry.get("resource")
                 if resource:
                     resources.append(resource)
-            url = _next_link(bundle)
+            next_url = _next_link(bundle)
+            # Canvas returns RELATIVE next links (e.g. '/ServiceRequest?_offset=10').
+            # Resolve against the current response URL so httpx gets an absolute URL.
+            url = str(response.url.join(next_url)) if next_url else None
             params = None  # the next-page URL already carries the query string
         return resources
 

@@ -113,6 +113,35 @@ class TestSearch:
 
         assert [r["id"] for r in results] == ["sr1", "sr2"]
 
+    def test_search_follows_relative_pagination(self) -> None:
+        """Canvas returns relative next links; they must resolve against the base."""
+        seen_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == TOKEN_PATH:
+                return _token_response()
+            seen_paths.append(request.url.path)
+            if request.url.params.get("_offset") == "10":
+                return httpx.Response(
+                    200,
+                    json={"resourceType": "Bundle", "entry": [{"resource": {"id": "sr2"}}]},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "resourceType": "Bundle",
+                    "entry": [{"resource": {"id": "sr1"}}],
+                    # relative URL, exactly as Canvas emits it
+                    "link": [{"relation": "next", "url": "/ServiceRequest?_offset=10"}],
+                },
+            )
+
+        client = _client_with(handler, now=lambda: 0.0)
+        results = client.search_service_requests("cat")
+
+        assert [r["id"] for r in results] == ["sr1", "sr2"]
+        assert seen_paths == ["/ServiceRequest", "/ServiceRequest"]
+
     def test_search_skips_entries_without_resource(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == TOKEN_PATH:

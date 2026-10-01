@@ -180,7 +180,8 @@ with `-LogonType Password` and supply the account password.
     "gender": "female",
     "address": { "line": ["..."], "city": "...", "state": "..", "postal_code": "...", "country": "US" },
     "phone": "...",
-    "ccda_url": "https://jlab-dev.canvasmedical.com/api/data-export/ccda/<patient key>?document=continuity"
+    "ccda_url": "https://jlab-dev.canvasmedical.com/api/data-export/ccda/<patient key>?document=continuity",
+    "ccda_xml": "<ClinicalDocument>...</ClinicalDocument>"
   },
   "insurance": [
     {
@@ -211,8 +212,8 @@ with `-LogonType Password` and supply the account password.
 
 Rather than silently emitting a thin record, the poller names what is missing:
 `no_order_match`, `low_confidence_order_match`, `no_active_coverage`,
-`no_icd10`, `no_cpt_codes`, `no_patient_address`. A downstream consumer can
-route on this field instead of re-deriving it.
+`no_icd10`, `no_cpt_codes`, `no_patient_address`, `no_ccda`. A downstream
+consumer can route on this field instead of re-deriving it.
 
 ### Where CPT codes come from
 
@@ -254,7 +255,7 @@ With the plugin installed, two things improve:
   `confidence: "exact"`. Records also gain a `lab_order` block with the real
   `lab_order_id` and requisition number. The heuristic remains as the fallback.
 
-### `patient.ccda_url`
+### `patient.ccda_url` / `patient.ccda_xml`
 
 Canvas has no endpoint that returns a PDF of the whole chart. The closest
 equivalent is a continuity-of-care **C-CDA** (XML), generated on request at:
@@ -264,18 +265,33 @@ GET {CANVAS_BASE_URL}/api/data-export/ccda/{patient_key}?document=continuity
 ```
 
 This is a different host than the rest of the poller (the auth/instance host,
-not the `fumage-` FHIR host) and a different, much wider scope: the patient's
-whole problem/med/allergy/encounter history, not just the order behind this
-result. For that reason the record carries only a **link** — `patient.ccda_url`
-— built from `Patient.id` (the "patient key") and never fetched by the poller
-itself. `ccda_url` is `null` when `patient` could not be resolved.
+not the `fumage-` FHIR host) and a different, much wider scope than everything
+else in the record: the patient's whole problem/med/allergy/encounter history,
+not just the order behind this result.
 
-The link is unauthenticated by itself — the same OAuth bearer token this
-poller already uses is required to actually fetch it. A downstream consumer
-that wants the document needs the same client credentials, or you'd extend
-the poller to fetch and attach it, which was deliberately not done here: it
-would put a full patient history behind every signed-off lab result, not just
-the CPT/ICD-10 data this feed is scoped to.
+Every record carries **both**:
+
+- `patient.ccda_url` — the export link itself, built from `Patient.id` (the
+  "patient key"), for provenance. It is unauthenticated by itself; fetching it
+  yourself needs the same OAuth client credentials this poller uses.
+- `patient.ccda_xml` — the fetched document content, verbatim, as a string.
+  This is fetched once per patient per poll cycle (`CanvasClient.get_ccda`,
+  cached for the cycle) and embedded directly, so a downstream consumer never
+  has to make its own authenticated call to Canvas to get it.
+
+Both are `null` when `patient` could not be resolved. `ccda_xml` is also
+`null` — with `no_ccda` in `data_gaps` — when the export could not be fetched
+(unreachable host, rejected token, 404, etc.); this is treated as optional
+enrichment the same way the CPT compendium lookup is: a failure is logged once
+and degrades to a gap flag rather than failing the record or the cycle.
+
+**Be aware of what this means for record size and scope.** Every signed-off
+lab result now carries the patient's *entire* chart history, not just the
+CPT/ICD-10 data scoped to that one order — a much larger PHI footprint per
+file than the rest of this feed. If a downstream consumer only needs the
+order-scoped billing data most of the time, consider having it read
+`ccda_xml` only when it actually needs the wider context, same as it would
+for any other field.
 
 ## Development
 

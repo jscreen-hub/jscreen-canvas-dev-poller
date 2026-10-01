@@ -126,6 +126,10 @@ def enrich_and_build(
     patient_reference = _reference(report, "subject") or ""
     patient = client.read_reference(patient_reference)
 
+    # The patient's whole-chart C-CDA export -- see the note on `get_ccda` for
+    # why a fetch failure here degrades to a gap instead of failing the record.
+    patient_id = (patient or {}).get("id")
+    ccda_content = client.get_ccda(patient_id) if patient_id else None
 
     # The order behind this result. Canvas offers no basedOn link over FHIR, so
     # narrow to the patient's committed lab orders and let the matcher choose --
@@ -237,6 +241,7 @@ def enrich_and_build(
             unresolved_order_codes(posted_codes, compendium) if compendium else []
         ),
         auth_base_url=client.auth_base_url,
+        ccda_content=ccda_content,
     )
 
 

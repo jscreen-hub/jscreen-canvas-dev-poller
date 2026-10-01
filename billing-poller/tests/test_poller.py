@@ -15,12 +15,20 @@ from tests.conftest import lab_report, review_encounter
 class FakeClient:
     """Stands in for CanvasClient: searches come from `results`, reads from `reads`."""
 
-    def __init__(self, results=None, reads=None, auth_base_url="https://jlab-dev.canvasmedical.com"):
+    def __init__(
+        self,
+        results=None,
+        reads=None,
+        auth_base_url="https://jlab-dev.canvasmedical.com",
+        ccdas=None,
+    ):
         self.results = results or {}
         self.reads = reads or {}
         self.searches = []
         self.read_refs = []
         self.auth_base_url = auth_base_url
+        self.ccdas = ccdas or {}
+        self.ccda_calls = []
 
     def search(self, resource_type, **params):
         self.searches.append((resource_type, params))
@@ -32,6 +40,10 @@ class FakeClient:
         if not reference or "/" not in reference:
             return None
         return self.reads.get(reference)
+
+    def get_ccda(self, patient_id, document="continuity"):
+        self.ccda_calls.append(patient_id)
+        return self.ccdas.get(patient_id)
 
 
 # -- sign-off gate -----------------------------------------------------------
@@ -168,6 +180,23 @@ def test_enrich_includes_the_patients_ccda_url():
         "https://jlab-dev.canvasmedical.com/api/data-export/ccda/pat-1"
         "?document=continuity"
     )
+
+
+def test_enrich_embeds_the_fetched_ccda_xml():
+    client = _enrichment_client()
+    client.ccdas["pat-1"] = "<ClinicalDocument>real chart</ClinicalDocument>"
+    record = enrich_and_build(client, lab_report(), review_encounter(), "NOW")
+    assert record["patient"]["ccda_xml"] == "<ClinicalDocument>real chart</ClinicalDocument>"
+    assert client.ccda_calls == ["pat-1"]
+    assert "no_ccda" not in record["data_gaps"]
+
+
+def test_enrich_flags_a_missing_ccda_as_a_gap_without_failing_the_record():
+    """`get_ccda` returning None (export unreachable, etc.) degrades to a gap."""
+    client = _enrichment_client()  # no ccdas configured -> get_ccda returns None
+    record = enrich_and_build(client, lab_report(), review_encounter(), "NOW")
+    assert record["patient"]["ccda_xml"] is None
+    assert "no_ccda" in record["data_gaps"]
 
 
 def test_enrich_scopes_diagnoses_to_the_matched_order():

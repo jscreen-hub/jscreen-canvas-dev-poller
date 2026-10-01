@@ -9,7 +9,8 @@ FHIR field sources (Canvas):
             which is the coordination-of-benefits sequence (1 = primary).
 - CPT:      Claim.item.productOrService. See the note in `extract_procedures`.
 - C-CDA:    Not a FHIR resource -- `GET {auth host}/api/data-export/ccda/{patient_key}`.
-            See the note in `build_ccda_url`.
+            Fetched by the caller (`CanvasClient.get_ccda`), not by this module.
+            See the notes on `build_ccda_url` and `ccda_content` below.
 """
 
 from __future__ import annotations
@@ -236,7 +237,9 @@ def extract_claim_diagnoses(claim: dict[str, Any] | None) -> list[dict[str, Any]
 
 
 def _patient_block(
-    patient: dict[str, Any] | None, ccda_url: str | None
+    patient: dict[str, Any] | None,
+    ccda_url: str | None,
+    ccda_xml: str | None,
 ) -> dict[str, Any] | None:
     if not patient:
         return None
@@ -248,7 +251,10 @@ def _patient_block(
         "gender": patient.get("gender"),
         "address": extract_address(patient),
         "phone": extract_phone(patient),
+        # Link for provenance/debugging, plus the fetched document itself --
+        # see the note on `auth_base_url`/`ccda_content` in build_billing_record.
         "ccda_url": ccda_url,
+        "ccda_xml": ccda_xml,
     }
 
 
@@ -377,6 +383,7 @@ def build_billing_record(
     authoritative_procedures: list[dict[str, Any]] | None = None,
     lab_order_key: str | None = None,
     auth_base_url: str | None = None,
+    ccda_content: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the billing record for one signed-off lab result.
 
@@ -388,6 +395,12 @@ def build_billing_record(
     `auth_base_url` is the Canvas auth host (Settings.auth_base_url, not the
     `fumage-` FHIR host); it's used only to build `patient.ccda_url`. Omitted or
     None, that field comes back None rather than failing the whole record.
+
+    `ccda_content` is the C-CDA XML already fetched by the caller (via
+    `CanvasClient.get_ccda`) -- this function does no I/O itself. It lands
+    verbatim in `patient.ccda_xml`; the patient's whole chart history, not
+    scoped to this order. A patient with no fetched content still produces a
+    record, with `ccda_xml: null` and `no_ccda` in `data_gaps`.
     """
     if authoritative_procedures is not None:
         # The report itself listed the tests it covers, so those codes -- and
@@ -406,7 +419,7 @@ def build_billing_record(
     claim_diagnoses = extract_claim_diagnoses(claim)
     insurance = _insurance_block(coverages, payors)
     ccda_url = build_ccda_url(auth_base_url, (patient or {}).get("id"))
-    patient_block = _patient_block(patient, ccda_url)
+    patient_block = _patient_block(patient, ccda_url, ccda_content)
 
     record: dict[str, Any] = {
         "event": "lab_billing_ready",
@@ -503,5 +516,7 @@ def build_billing_record(
         gaps.append("duplicate_cpt_suppressed")
     if patient_block is None or not patient_block.get("address"):
         gaps.append("no_patient_address")
+    if patient_block is not None and not ccda_content:
+        gaps.append("no_ccda")
     record["data_gaps"] = gaps
     return record

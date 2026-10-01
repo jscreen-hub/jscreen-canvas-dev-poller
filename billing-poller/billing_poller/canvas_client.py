@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from billing_poller.config import Settings
+from billing_poller.config import CCDA_DOCUMENT_TYPE, CCDA_PATH, Settings
 
 # Refresh the token this many seconds before its stated expiry.
 _TOKEN_SKEW_SECONDS = 60
@@ -35,13 +35,16 @@ class CanvasClient:
         settings: Settings,
         http: httpx.Client | None = None,
         now: Callable[[], float] | None = None,
+        log: Callable[[str], None] = print,
     ) -> None:
         self._settings = settings
         self._http = http if http is not None else httpx.Client(timeout=60.0)
         self._now = now if now is not None else time.monotonic
+        self._log = log
         self._token: str | None = None
         self._token_expiry: float = 0.0
         self._read_cache: dict[str, dict[str, Any] | None] = {}
+        self._ccda_cache: dict[str, str | None] = {}
 
     @property
     def auth_base_url(self) -> str:
@@ -158,10 +161,56 @@ class CanvasClient:
         self._read_cache[reference] = result
         return result
 
+    # -- non-FHIR: C-CDA export ----------------------------------------------
+
+    def get_ccda(
+        self, patient_id: str, document: str = CCDA_DOCUMENT_TYPE
+    ) -> str | None:
+        """Fetch the patient's continuity-of-care C-CDA export (XML), or None.
+
+        Not a FHIR resource: it lives on the auth host (see `auth_base_url`),
+        not the `fumage-` FHIR host, and returns XML text rather than a JSON
+        bundle. Source: docs.canvasmedical.com/api/ccda/
+
+        This is treated as optional, best-effort enrichment, the same way
+        `BillingLookup` is: a slow or unreachable export must not take the
+        whole record -- let alone the whole poll cycle -- down with it. A
+        failure is logged once per patient and cached as None so a broken
+        export isn't retried every report for the same patient in one cycle.
+        Cached for the life of the client; see `clear_cache`.
+        """
+        if patient_id in self._ccda_cache:
+            return self._ccda_cache[patient_id]
+
+        url = f"{self._settings.auth_base_url}{CCDA_PATH.format(patient_key=patient_id)}"
+        try:
+            response = self._http.get(
+                url,
+                params={"document": document},
+                headers={"Authorization": f"Bearer {self._get_token()}"},
+            )
+        except httpx.HTTPError as exc:
+            self._log(f"C-CDA fetch failed for patient {patient_id} ({exc}); continuing without it")
+            self._ccda_cache[patient_id] = None
+            return None
+
+        if response.status_code >= 400:
+            self._log(
+                f"C-CDA fetch error {response.status_code} for patient {patient_id}; "
+                "continuing without it"
+            )
+            self._ccda_cache[patient_id] = None
+            return None
+
+        text = response.text
+        self._ccda_cache[patient_id] = text
+        return text
+
     def clear_cache(self) -> None:
         """Drop cached reads. Called between poll cycles so a long-running loop
         picks up coverage and demographic changes."""
         self._read_cache.clear()
+        self._ccda_cache.clear()
 
     def close(self) -> None:
         self._http.close()

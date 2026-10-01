@@ -265,6 +265,7 @@ def build(**overrides):
         "claim": CLAIM,
         "captured_at": "2026-09-08T00:00:00+00:00",
         "auth_base_url": "https://jlab-dev.canvasmedical.com",
+        "ccda_content": "<ClinicalDocument>fake ccda</ClinicalDocument>",
     }
     kwargs.update(overrides)
     return build_billing_record(**kwargs)
@@ -285,6 +286,7 @@ def test_record_shape_is_complete_when_all_data_is_present():
         "https://jlab-dev.canvasmedical.com/api/data-export/ccda/pat-1"
         "?document=continuity"
     )
+    assert record["patient"]["ccda_xml"] == "<ClinicalDocument>fake ccda</ClinicalDocument>"
     assert record["diagnoses"] == [{"code": "K219", "display": "GERD"}]
     assert record["procedures"][0]["code"] == "80053"
     assert record["claim"]["queue"] == "NeedsCodingReview"
@@ -341,6 +343,20 @@ def test_missing_billing_data_is_reported_as_gaps():
 def test_ccda_url_is_none_when_no_auth_host_is_given():
     record = build(auth_base_url=None)
     assert record["patient"]["ccda_url"] is None
+
+
+def test_missing_ccda_content_is_flagged_as_a_gap():
+    """A patient present but no C-CDA fetched (e.g. the export failed) is a
+    named gap, not a silently empty field."""
+    record = build(ccda_content=None)
+    assert record["patient"]["ccda_xml"] is None
+    assert "no_ccda" in record["data_gaps"]
+
+
+def test_ccda_gap_is_not_raised_without_a_patient():
+    record = build(patient=None, ccda_content=None)
+    assert record["patient"] is None
+    assert "no_ccda" not in record["data_gaps"]
 
 
 def test_uncoded_claim_counts_as_missing_cpt():

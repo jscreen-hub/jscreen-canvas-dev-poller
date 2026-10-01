@@ -37,6 +37,84 @@ def test_auth_base_url_is_the_instance_host_not_the_fhir_host():
     assert client.auth_base_url == "https://jlab-dev.canvasmedical.com"
 
 
+# -- C-CDA export --------------------------------------------------------
+
+
+def test_get_ccda_fetches_from_the_auth_host_not_the_fhir_host():
+    seen = {}
+
+    def handler(request):
+        if str(request.url) == AUTH:
+            return token_response()
+        seen["url"] = str(request.url)
+        seen["auth_header"] = request.headers.get("authorization")
+        return httpx.Response(200, text="<ClinicalDocument>chart</ClinicalDocument>")
+
+    client = client_with(handler)
+    xml = client.get_ccda("pat-1")
+    assert xml == "<ClinicalDocument>chart</ClinicalDocument>"
+    assert seen["url"] == (
+        "https://jlab-dev.canvasmedical.com/api/data-export/ccda/pat-1?document=continuity"
+    )
+    assert seen["auth_header"] == "Bearer tok"
+
+
+def test_get_ccda_is_cached_per_patient():
+    calls = {"ccda": 0}
+
+    def handler(request):
+        if str(request.url) == AUTH:
+            return token_response()
+        calls["ccda"] += 1
+        return httpx.Response(200, text="<ClinicalDocument/>")
+
+    client = client_with(handler)
+    client.get_ccda("pat-1")
+    client.get_ccda("pat-1")
+    assert calls["ccda"] == 1
+
+
+def test_get_ccda_returns_none_on_error_without_raising():
+    def handler(request):
+        if str(request.url) == AUTH:
+            return token_response()
+        return httpx.Response(404, text="not found")
+
+    client = client_with(handler)
+    assert client.get_ccda("pat-1") is None
+
+
+def test_get_ccda_failure_is_cached_so_it_is_not_retried_within_a_cycle():
+    calls = {"ccda": 0}
+
+    def handler(request):
+        if str(request.url) == AUTH:
+            return token_response()
+        calls["ccda"] += 1
+        return httpx.Response(500, text="boom")
+
+    client = client_with(handler)
+    client.get_ccda("pat-1")
+    client.get_ccda("pat-1")
+    assert calls["ccda"] == 1
+
+
+def test_clear_cache_forgets_ccda_too():
+    calls = {"ccda": 0}
+
+    def handler(request):
+        if str(request.url) == AUTH:
+            return token_response()
+        calls["ccda"] += 1
+        return httpx.Response(200, text="<ClinicalDocument/>")
+
+    client = client_with(handler)
+    client.get_ccda("pat-1")
+    client.clear_cache()
+    client.get_ccda("pat-1")
+    assert calls["ccda"] == 2
+
+
 # -- auth --------------------------------------------------------------------
 
 

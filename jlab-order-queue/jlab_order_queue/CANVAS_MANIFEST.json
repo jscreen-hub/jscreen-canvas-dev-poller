@@ -1,0 +1,70 @@
+{
+    "sdk_version": "0.1.4",
+    "plugin_version": "0.0.1",
+    "name": "jlab_order_queue",
+    "description": "Limits a physician to one ROUTINE JLab lab order per patient per local calendar day, deferring extras in FIFO order via a Command Validation block on the order's own Sign action. STAT/URGENT orders always bypass the queue. The physician always performs the actual signature -- this plugin never signs, cancels, or deletes a clinical order.",
+    "url_permissions": [],
+    "custom_data": {
+        "namespace": "jlab__order_queue",
+        "access": "read_write"
+    },
+    "components": {
+        "handlers": [
+            {
+                "class": "jlab_order_queue.handlers.lab_order_queue:LabOrderQueueHandler",
+                "description": "Maintains the routine-lab-order queue in real time: origination, validation-time signing block, commit, update, delete, and enter-in-error.",
+                "data_access": {
+                    "event": "",
+                    "read": [],
+                    "write": []
+                }
+            },
+            {
+                "class": "jlab_order_queue.handlers.release_task:ReleaseDeferredOrders",
+                "description": "Every 5 minutes, promotes deferred orders whose eligible date has arrived (catches local-midnight rollover with no other triggering event).",
+                "data_access": {
+                    "event": "",
+                    "read": [],
+                    "write": []
+                }
+            },
+            {
+                "class": "jlab_order_queue.api.queue_api:QueueAPI",
+                "description": "Staff-session-authenticated HTTP API serving the queue page and its JSON data, for both the global and patient-specific applications.",
+                "data_access": {
+                    "event": "",
+                    "read": [],
+                    "write": []
+                }
+            }
+        ],
+        "applications": [
+            {
+                "class": "jlab_order_queue.apps.queue_app:GlobalQueueApp",
+                "name": "JLab Order Queue",
+                "description": "View and filter every patient's JLab routine lab order queue.",
+                "icon": "assets/queue-icon.png",
+                "scope": "global"
+            },
+            {
+                "class": "jlab_order_queue.apps.queue_app:PatientQueueApp",
+                "name": "JLab Order Queue",
+                "description": "View this patient's JLab routine lab order queue.",
+                "icon": "assets/queue-icon.png",
+                "scope": "patient_specific"
+            }
+        ],
+        "commands": [],
+        "content": [],
+        "effects": [],
+        "views": []
+    },
+    "variables": [
+        {"name": "namespace_read_write_access_key", "sensitive": false}
+    ],
+    "tags": {},
+    "references": [],
+    "license": "",
+    "diagram": false,
+    "readme": "./README.md"
+}

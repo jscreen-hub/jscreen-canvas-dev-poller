@@ -13,8 +13,8 @@ This is an alternative to the `lab-order-export` Canvas plugin: the plugin
 1. **Authenticate** to Canvas via OAuth 2.0 `client_credentials` against
    `{CANVAS_BASE_URL}/auth/token/` (token cached until near expiry).
 2. **Search** `GET {FHIR base}/ServiceRequest?category=http://snomed.info/sct|108252007`
-   (SNOMED "Laboratory procedure") over a recent `authored` window, following
-   pagination.
+   (SNOMED "Laboratory procedure") over a recent `authored` window, paging by
+   explicit `_offset` (see *Pagination* below).
 3. **Filter to committed orders.** Only `active` + `completed` orders are
    exported; `draft` (staged/unsigned) and `entered-in-error` are skipped. This
    matches the "doctor signs/commits the order" requirement. Canvas has no
@@ -29,6 +29,31 @@ This is an alternative to the `lab-order-export` Canvas plugin: the plugin
 > **Note on granularity:** Canvas exposes each ordered test as its own
 > `ServiceRequest`, so a multi-test lab order produces one file per test. Verify
 > this against your data during the first run.
+
+## Pagination (do not "simplify" this)
+
+Canvas search results are **not stably ordered across requests**. Following the
+bundle's `next` links one page at a time returns some records twice and never
+returns others at all: on 2026-09-09 a 120-result query paged at the default
+size of 10 collected 120 entries but only **87 distinct** orders — 33 were
+invisible, including committed ones that therefore never exported.
+
+The `next` links themselves are correct (right filters, right offsets). The
+result ordering underneath them drifts between requests, and 12 sequential round
+trips gave it plenty of room.
+
+`_search_all` therefore:
+
+1. pages by explicit `_offset` at `_count=100` (Canvas caps a page at 100
+   regardless of a larger value), so there are as few round trips as possible;
+2. de-duplicates by resource id;
+3. re-walks, up to `_MAX_SEARCH_PASSES`, whenever the distinct count is short of
+   the bundle's `total`;
+4. stops after `_MAX_PAGES` regardless, so a server reporting no `total` cannot
+   spin the poller forever.
+
+Reverting to a `next`-link walk silently loses orders. There is no error and the
+log still reports the full `total`, which is what made this hard to spot.
 
 ## Configuration
 

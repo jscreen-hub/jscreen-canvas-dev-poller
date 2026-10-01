@@ -1,125 +1,169 @@
-"""Tests for poller orchestration."""
+"""Tests for the polling cycle over the signed lab-order feed."""
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock
+import os
 
-from order_poller.poller import enrich_and_build, poll_once, write_record
+import pytest
+
+from order_poller.poller import order_id_of, poll_once, seed, write_record
 from order_poller.state import ProcessedStore
 
-PATIENT = {"resourceType": "Patient", "id": "patient-1"}
-PRACTITIONER = {"resourceType": "Practitioner", "id": "prac-1"}
-CONDITION = {"resourceType": "Condition", "id": "cond-1", "code": {"coding": []}}
 
-SERVICE_REQUEST = {
-    "id": "sr-1",
-    "status": "active",
-    "authoredOn": "2026-07-07T14:02:55+00:00",
-    "code": {"coding": []},
-    "subject": {"reference": "Patient/patient-1"},
-    "requester": {"reference": "Practitioner/prac-1"},
-    "reasonReference": [{"reference": "Condition/cond-1"}],
-}
+class FakeSource:
+    """Stands in for LabOrderSource."""
 
+    def __init__(self, records=None, error=None):
+        self._records = records or []
+        self._error = error
+        self.calls = 0
 
-def _reference_reader() -> MagicMock:
-    def read(reference: str | None) -> dict | None:
-        return {
-            "Patient/patient-1": PATIENT,
-            "Practitioner/prac-1": PRACTITIONER,
-            "Condition/cond-1": CONDITION,
-        }.get(reference or "")
-
-    client = MagicMock()
-    client.read_reference.side_effect = read
-    return client
+    def signed_orders(self):
+        self.calls += 1
+        if self._error:
+            raise self._error
+        return self._records
 
 
-def test_write_record_creates_file(tmp_path: Path) -> None:
-    record = {"order": {"id": "abc"}, "event": "lab_order_polled"}
-    path = write_record(str(tmp_path / "orders"), record)
-
-    assert Path(path).name == "abc.json"
-    assert json.loads(Path(path).read_text(encoding="utf-8")) == record
-
-
-def test_enrich_and_build_caches_reads() -> None:
-    client = _reference_reader()
-    patient_cache: dict = {}
-    practitioner_cache: dict = {}
-
-    enrich_and_build(client, SERVICE_REQUEST, "t", patient_cache, practitioner_cache)
-    enrich_and_build(client, SERVICE_REQUEST, "t", patient_cache, practitioner_cache)
-
-    # Patient and Practitioner read once each (cached); Condition read each time.
-    reads = [c.args[0] for c in client.read_reference.call_args_list]
-    assert reads.count("Patient/patient-1") == 1
-    assert reads.count("Practitioner/prac-1") == 1
-    assert reads.count("Condition/cond-1") == 2
-
-
-def test_poll_once_writes_new_orders_and_updates_store(tmp_path: Path) -> None:
-    client = _reference_reader()
-    client.search_service_requests.return_value = [SERVICE_REQUEST]
-    store = ProcessedStore(str(tmp_path / "state.json")).load()
-    out_dir = str(tmp_path / "orders")
-
-    written = poll_once(client, store, out_dir, "cat", "2026-07-01", "t", log=lambda m: None)
-
-    assert written == 1
-    assert store.contains("sr-1") is True
-    record = json.loads((tmp_path / "orders" / "sr-1.json").read_text(encoding="utf-8"))
-    assert record["order"]["id"] == "sr-1"
-    assert record["patient"]["id"] == "patient-1"
-    # State persisted to disk.
-    assert ProcessedStore(str(tmp_path / "state.json")).load().contains("sr-1") is True
+def record(order_id="lo-1", requisition="REQ-1", codes=("100002",)):
+    """A record shaped as the plugin returns it."""
+    return {
+        "order": {
+            "id": order_id,
+            "requisition_number": requisition,
+            "status": "active",
+            "authored_on": "2026-09-09T15:25:33+00:00",
+            "lab_partner": "Generic Lab",
+            "tests": [
+                {
+                    "system": "http://loinc.org",
+                    "code": c,
+                    "display": "Core Panel",
+                    "cpt_code": "81220",
+                }
+                for c in codes
+            ],
+        },
+        "patient": {
+            "id": "pat-1",
+            "mrn": "MRN-9",
+            "name": "Ada Lovelace",
+            "date_of_birth": "1980-01-02",
+        },
+        "ordering_provider": {"id": "prov-1", "name": "Ian Lomas", "npi": "111"},
+        "diagnoses": [{"code": "Z1371", "display": "Carrier screening"}],
+    }
 
 
-def test_poll_once_skips_already_processed(tmp_path: Path) -> None:
-    client = _reference_reader()
-    client.search_service_requests.return_value = [SERVICE_REQUEST]
-    store = ProcessedStore(str(tmp_path / "state.json")).load()
-    store.add("sr-1")
-    out_dir = str(tmp_path / "orders")
-
-    written = poll_once(client, store, out_dir, "cat", "2026-07-01", "t", log=lambda m: None)
-
-    assert written == 0
-    assert not (tmp_path / "orders" / "sr-1.json").exists()
-    assert client.read_reference.call_args_list == []
+# -- identity ----------------------------------------------------------------
 
 
-def test_poll_once_filters_by_status(tmp_path: Path) -> None:
-    draft = dict(SERVICE_REQUEST, id="sr-draft", status="draft")
-    client = _reference_reader()
-    client.search_service_requests.return_value = [draft, SERVICE_REQUEST]
-    store = ProcessedStore(str(tmp_path / "state.json")).load()
-    out_dir = str(tmp_path / "orders")
+def test_order_id_is_the_lab_order_uuid():
+    assert order_id_of(record(order_id="4b7452dc")) == "4b7452dc"
 
-    written = poll_once(
-        client,
-        store,
-        out_dir,
-        "cat",
-        None,
-        "t",
-        allowed_statuses=("active", "completed"),
-        log=lambda m: None,
+
+def test_order_id_none_when_absent():
+    assert order_id_of({"order": {}}) is None
+    assert order_id_of({}) is None
+
+
+# -- output shape ------------------------------------------------------------
+
+
+def test_written_record_keeps_the_legacy_envelope(tmp_path):
+    """Downstream consumers must not have to change: same event name, same
+    top-level keys, same nesting as the old ServiceRequest-sourced records."""
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    poll_once(FakeSource([record()]), store, str(tmp_path / "out"), "NOW", log=lambda m: None)
+
+    written = json.loads((tmp_path / "out" / "lo-1.json").read_text(encoding="utf-8"))
+    assert written["event"] == "lab_order_polled"
+    assert written["captured_at"] == "NOW"
+    assert set(written) == {
+        "event", "captured_at", "order", "patient", "ordering_provider", "diagnoses",
+    }
+    assert set(written["patient"]) == {"id", "mrn", "name", "date_of_birth"}
+    assert set(written["ordering_provider"]) == {"id", "name", "npi"}
+    assert written["diagnoses"] == [{"code": "Z1371", "display": "Carrier screening"}]
+
+
+def test_order_carries_both_the_uuid_and_the_requisition(tmp_path):
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    poll_once(
+        FakeSource([record(order_id="4b7452dc", requisition="D9B126B04F3")]),
+        store, str(tmp_path / "out"), "NOW", log=lambda m: None,
     )
+    order = json.loads((tmp_path / "out" / "4b7452dc.json").read_text(encoding="utf-8"))["order"]
+    assert order["id"] == "4b7452dc"
+    assert order["requisition_number"] == "D9B126B04F3"
+    assert order["tests"][0]["cpt_code"] == "81220"
 
-    assert written == 1
-    assert (tmp_path / "orders" / "sr-1.json").exists()
-    assert not (tmp_path / "orders" / "sr-draft.json").exists()
-    assert store.contains("sr-draft") is False
+
+def test_file_is_named_after_the_lab_order_id(tmp_path):
+    path = write_record(str(tmp_path / "out"), record(order_id="lo-42"))
+    assert os.path.basename(path) == "lo-42.json"
 
 
-def test_poll_once_skips_resource_without_id(tmp_path: Path) -> None:
-    client = _reference_reader()
-    client.search_service_requests.return_value = [{"status": "active"}]
-    store = ProcessedStore(str(tmp_path / "state.json")).load()
+# -- cycle -------------------------------------------------------------------
 
-    written = poll_once(
-        client, store, str(tmp_path / "orders"), "cat", None, "t", log=lambda m: None
-    )
 
-    assert written == 0
+def test_new_orders_are_written_once(tmp_path):
+    source = FakeSource([record("lo-1"), record("lo-2")])
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    out = str(tmp_path / "out")
+
+    assert poll_once(source, store, out, "NOW", log=lambda m: None) == 2
+    assert poll_once(source, store, out, "NOW", log=lambda m: None) == 0
+    assert sorted(os.listdir(out)) == ["lo-1.json", "lo-2.json"]
+
+
+def test_processed_ids_survive_a_restart(tmp_path):
+    state = str(tmp_path / "s.json")
+    out = str(tmp_path / "out")
+    source = FakeSource([record("lo-1")])
+
+    poll_once(source, ProcessedStore(state), out, "NOW", log=lambda m: None)
+    assert poll_once(source, ProcessedStore(state).load(), out, "NOW", log=lambda m: None) == 0
+
+
+def test_records_without_an_id_are_skipped(tmp_path):
+    source = FakeSource([{"order": {"requisition_number": "x"}}, record("lo-1")])
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    assert poll_once(source, store, str(tmp_path / "out"), "NOW", log=lambda m: None) == 1
+
+
+def test_a_source_failure_propagates(tmp_path):
+    """The feed must fail loudly: an empty result would look like 'no new orders'."""
+    source = FakeSource(error=RuntimeError("plugin down"))
+    with pytest.raises(RuntimeError, match="plugin down"):
+        poll_once(source, ProcessedStore(str(tmp_path / "s.json")),
+                  str(tmp_path / "out"), "NOW", log=lambda m: None)
+
+
+# -- cutover seeding ---------------------------------------------------------
+
+
+def test_seed_marks_existing_orders_without_writing_files(tmp_path):
+    """Cutting over from ServiceRequest ids must not re-deliver known orders."""
+    out = tmp_path / "out"
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    source = FakeSource([record("lo-1"), record("lo-2")])
+
+    assert seed(source, store, log=lambda m: None) == 2
+    assert not out.exists()
+    assert poll_once(source, store, str(out), "NOW", log=lambda m: None) == 0
+
+
+def test_seed_then_a_genuinely_new_order_still_flows(tmp_path):
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    seed(FakeSource([record("lo-1")]), store, log=lambda m: None)
+
+    source = FakeSource([record("lo-1"), record("lo-2")])
+    assert poll_once(source, store, str(tmp_path / "out"), "NOW", log=lambda m: None) == 1
+    assert os.listdir(tmp_path / "out") == ["lo-2.json"]
+
+
+def test_seed_is_idempotent(tmp_path):
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    source = FakeSource([record("lo-1")])
+    assert seed(source, store, log=lambda m: None) == 1
+    assert seed(source, store, log=lambda m: None) == 0

@@ -22,6 +22,9 @@ LAB_CATEGORY = "http://snomed.info/sct|108252007"
 # `draft` = staged/unsigned; `entered-in-error` = voided.
 COMMITTED_STATUSES = ("active", "completed")
 
+# Path to the lab_billing_lookup plugin, which serves the signed lab-order feed.
+LOOKUP_PATH = "/plugin-io/api/lab_billing_lookup/billing"
+
 DEFAULT_OUTPUT_DIR = r"C:\Projects\canvas-orders\orders"
 DEFAULT_STATE_FILE = r"C:\Projects\canvas-orders\order-poller\.state\processed_ids.json"
 DEFAULT_LOOKBACK_DAYS = 2
@@ -53,6 +56,8 @@ class Settings:
     client_secret: str
     fhir_base_url: str
     scope: str | None
+    lookup_url: str
+    lookup_api_key: str
     output_dir: str
     state_file: str
     lookback_days: int
@@ -70,6 +75,11 @@ class Settings:
             client_secret=_require(env, "CANVAS_CLIENT_SECRET"),
             fhir_base_url=fhir_base_url,
             scope=env.get("CANVAS_SCOPE") or None,
+            lookup_url=(
+                env.get("BILLING_LOOKUP_URL", "").rstrip("/")
+                or f"{auth_base_url}{LOOKUP_PATH}"
+            ),
+            lookup_api_key=env.get("BILLING_LOOKUP_API_KEY", ""),
             output_dir=env.get("ORDER_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
             state_file=env.get("ORDER_STATE_FILE", DEFAULT_STATE_FILE),
             lookback_days=int(env.get("ORDER_LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS)),

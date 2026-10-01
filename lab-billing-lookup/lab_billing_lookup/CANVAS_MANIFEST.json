@@ -1,0 +1,34 @@
+{
+    "sdk_version": "0.1.4",
+    "plugin_version": "0.0.6",
+    "name": "lab_billing_lookup",
+    "description": "Read-only API exposing lab billing data absent from FHIR: CPT codes from the lab partner compendium, and the exact DiagnosticReport -> LabOrder link.",
+    "components": {
+        "handlers": [
+            {
+                "class": "lab_billing_lookup.handlers.billing_lookup:BillingLookupAPI",
+                "description": "Serves GET /billing/compendium (orderable tests with CPT codes), GET /billing/report/<id> (the exact lab order behind a diagnostic report), and GET /billing/orders/<patient_id> (lab orders with LabOrder id, requisition number and test codes).",
+                "data_access": {
+                    "event": "",
+                    "read": [],
+                    "write": []
+                }
+            }
+        ],
+        "commands": [],
+        "content": [],
+        "effects": [],
+        "views": []
+    },
+    "variables": [
+        {
+            "name": "BILLING_LOOKUP_API_KEY",
+            "sensitive": true
+        }
+    ],
+    "tags": {},
+    "references": [],
+    "license": "",
+    "diagram": false,
+    "readme": "./README.md"
+}

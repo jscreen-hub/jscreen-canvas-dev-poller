@@ -10,6 +10,8 @@ def make_settings(**overrides: object) -> Settings:
         "client_secret": "secret",
         "fhir_base_url": "https://fumage-jlab-dev.canvasmedical.com",
         "scope": "system/*.read",
+        "lookup_url": "https://jlab-dev.canvasmedical.com/plugin-io/api/lab_billing_lookup/billing",
+        "lookup_api_key": "key",
         "output_dir": "out",
         "state_file": "state.json",
         "lookback_days": 2,

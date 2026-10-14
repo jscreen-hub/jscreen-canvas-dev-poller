@@ -70,8 +70,10 @@ def test_order_id_none_when_absent():
 
 
 def test_written_record_keeps_the_legacy_envelope(tmp_path):
-    """Downstream consumers must not have to change: same event name, same
-    top-level keys, same nesting as the old ServiceRequest-sourced records."""
+    """Downstream consumers must not have to change for existing fields: same
+    event name, same existing top-level keys, same nesting as the old
+    ServiceRequest-sourced records -- `genetic_history` is new, additive, and
+    null when no client is configured (as here)."""
     store = ProcessedStore(str(tmp_path / "s.json"))
     poll_once(FakeSource([record()]), store, str(tmp_path / "out"), "NOW", log=lambda m: None)
 
@@ -80,7 +82,9 @@ def test_written_record_keeps_the_legacy_envelope(tmp_path):
     assert written["captured_at"] == "NOW"
     assert set(written) == {
         "event", "captured_at", "order", "patient", "ordering_provider", "diagnoses",
+        "genetic_history",
     }
+    assert written["genetic_history"] is None
     assert set(written["patient"]) == {"id", "mrn", "name", "date_of_birth"}
     assert set(written["ordering_provider"]) == {"id", "name", "npi"}
     assert written["diagnoses"] == [{"code": "Z1371", "display": "Carrier screening"}]
@@ -167,3 +171,92 @@ def test_seed_is_idempotent(tmp_path):
     source = FakeSource([record("lo-1")])
     assert seed(source, store, log=lambda m: None) == 1
     assert seed(source, store, log=lambda m: None) == 0
+
+
+# -- genetic history enrichment ----------------------------------------------
+
+
+class FakeGeneticHistoryClient:
+    """Stands in for GeneticHistoryClient -- `build_genetic_history` calls
+    `.search()` on whatever it's given, so this only needs to fake that."""
+
+    def __init__(self, responses=None, documents=None, error=None):
+        self._responses = responses or []
+        self._documents = documents or []
+        self._error = error
+        self.search_calls = []
+
+    def search(self, resource_type, **params):
+        self.search_calls.append((resource_type, params))
+        if self._error:
+            raise self._error
+        return self._responses if resource_type == "QuestionnaireResponse" else self._documents
+
+
+def _cancer_history_response():
+    return {
+        "_questionnaire": {
+            "extension": [
+                {
+                    "url": "http://hl7.org/fhir/StructureDefinition/display",
+                    "valueString": "Finch Cancer History (v1)",
+                }
+            ]
+        },
+        "item": [{"linkId": "x", "text": "Reported cancer type", "answer": [{"valueString": "Breast"}]}],
+    }
+
+
+def test_genetic_history_is_attached_when_a_client_is_given(tmp_path):
+    client = FakeGeneticHistoryClient(responses=[_cancer_history_response()])
+    store = ProcessedStore(str(tmp_path / "s.json"))
+
+    poll_once(
+        FakeSource([record()]), store, str(tmp_path / "out"), "NOW",
+        genetic_history_client=client, log=lambda m: None,
+    )
+
+    written = json.loads((tmp_path / "out" / "lo-1.json").read_text(encoding="utf-8"))
+    assert written["genetic_history"]["cancer_history"] == [{"reported_cancer_type": "Breast"}]
+    assert ("QuestionnaireResponse", {"patient": "Patient/pat-1"}) in client.search_calls
+
+
+def test_genetic_history_is_fetched_once_per_patient_per_cycle(tmp_path):
+    """Two orders for the same patient in one cycle must not repeat the fetch."""
+    client = FakeGeneticHistoryClient(responses=[_cancer_history_response()])
+    store = ProcessedStore(str(tmp_path / "s.json"))
+
+    poll_once(
+        FakeSource([record("lo-1"), record("lo-2")]), store, str(tmp_path / "out"), "NOW",
+        genetic_history_client=client, log=lambda m: None,
+    )
+
+    questionnaire_calls = [c for c in client.search_calls if c[0] == "QuestionnaireResponse"]
+    assert len(questionnaire_calls) == 1
+
+
+def test_genetic_history_fetch_failure_does_not_fail_the_order(tmp_path):
+    client = FakeGeneticHistoryClient(error=RuntimeError("fhir down"))
+    store = ProcessedStore(str(tmp_path / "s.json"))
+
+    written_count = poll_once(
+        FakeSource([record()]), store, str(tmp_path / "out"), "NOW",
+        genetic_history_client=client, log=lambda m: None,
+    )
+
+    assert written_count == 1
+    written = json.loads((tmp_path / "out" / "lo-1.json").read_text(encoding="utf-8"))
+    assert written["genetic_history"] is None
+
+
+def test_genetic_history_is_null_for_a_patient_with_no_finch_data(tmp_path):
+    client = FakeGeneticHistoryClient(responses=[], documents=[])
+    store = ProcessedStore(str(tmp_path / "s.json"))
+
+    poll_once(
+        FakeSource([record()]), store, str(tmp_path / "out"), "NOW",
+        genetic_history_client=client, log=lambda m: None,
+    )
+
+    written = json.loads((tmp_path / "out" / "lo-1.json").read_text(encoding="utf-8"))
+    assert written["genetic_history"] is None

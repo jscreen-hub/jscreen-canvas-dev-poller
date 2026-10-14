@@ -6,6 +6,7 @@ import json
 import os
 from typing import Any, Callable
 
+from order_poller.genetic_history import GeneticHistoryClient, build_genetic_history
 from order_poller.source import LabOrderSource
 from order_poller.state import ProcessedStore
 
@@ -57,11 +58,24 @@ def poll_once(
     store: ProcessedStore,
     output_dir: str,
     captured_at: str,
+    genetic_history_client: GeneticHistoryClient | None = None,
     log: Callable[[str], None] = print,
 ) -> int:
-    """Run one polling cycle. Returns the number of new orders written."""
+    """Run one polling cycle. Returns the number of new orders written.
+
+    `genetic_history_client` is optional: pass it to attach each record's
+    patient's Finch family/genetic-history intake (see genetic_history.py).
+    Omitted (or the fetch failing for a given patient), the record is still
+    written with `genetic_history: null` -- this enrichment never blocks or
+    fails the core order feed.
+    """
     records = source.signed_orders()
     log(f"found {len(records)} signed lab order(s)")
+
+    # One fetch per patient per cycle, not per order -- a patient's Finch
+    # intake is a one-time event, and several orders for the same patient in
+    # one cycle would otherwise repeat the same two FHIR searches needlessly.
+    genetic_history_cache: dict[str, dict[str, Any] | None] = {}
 
     written = 0
     for record in records:
@@ -71,6 +85,17 @@ def poll_once(
         # The plugin supplies order/patient/ordering_provider/diagnoses; the
         # poller owns only the envelope, exactly as it did with the FHIR source.
         output = {"event": "lab_order_polled", "captured_at": captured_at, **record}
+
+        patient_id = (record.get("patient") or {}).get("id")
+        if genetic_history_client is not None and patient_id:
+            if patient_id not in genetic_history_cache:
+                genetic_history_cache[patient_id] = build_genetic_history(
+                    genetic_history_client, patient_id, log=log
+                )
+            output["genetic_history"] = genetic_history_cache[patient_id]
+        else:
+            output["genetic_history"] = None
+
         path = write_record(output_dir, output)
         store.add(order_id)
         written += 1

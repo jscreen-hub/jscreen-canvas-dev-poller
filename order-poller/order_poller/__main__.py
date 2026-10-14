@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 
 from order_poller.config import Settings, load_settings
+from order_poller.genetic_history import GeneticHistoryClient
 from order_poller.poller import poll_once, seed
 from order_poller.source import LabOrderSource
 from order_poller.state import ProcessedStore
@@ -25,6 +26,16 @@ from order_poller.state import ProcessedStore
 def run(settings: Settings, once: bool, do_seed: bool = False) -> int:
     source = LabOrderSource(settings.lookup_url, settings.lookup_api_key)
     store = ProcessedStore(settings.state_file).load()
+    # Reuses the FHIR credentials Settings already carries (unused for order
+    # data itself since the cutover to lab_billing_lookup) -- no separate
+    # configuration needed for this enrichment.
+    genetic_history_client = GeneticHistoryClient(
+        auth_base_url=settings.auth_base_url,
+        fhir_base_url=settings.fhir_base_url,
+        client_id=settings.client_id,
+        client_secret=settings.client_secret,
+        scope=settings.scope,
+    )
 
     if not source.configured:
         print(
@@ -33,6 +44,7 @@ def run(settings: Settings, once: bool, do_seed: bool = False) -> int:
             file=sys.stderr,
         )
         source.close()
+        genetic_history_client.close()
         return 1
 
     try:
@@ -44,7 +56,13 @@ def run(settings: Settings, once: bool, do_seed: bool = False) -> int:
             captured_at = datetime.now(timezone.utc).isoformat()
             print(f"[{captured_at}] polling {settings.lookup_url}/lab-orders")
             try:
-                poll_once(source, store, settings.output_dir, captured_at)
+                poll_once(
+                    source,
+                    store,
+                    settings.output_dir,
+                    captured_at,
+                    genetic_history_client=genetic_history_client,
+                )
             except Exception as exc:  # noqa: BLE001 - keep the loop alive across errors
                 print(f"poll cycle failed: {exc}", file=sys.stderr)
                 if once:
@@ -57,6 +75,7 @@ def run(settings: Settings, once: bool, do_seed: bool = False) -> int:
         return 0
     finally:
         source.close()
+        genetic_history_client.close()
 
 
 def main() -> int:

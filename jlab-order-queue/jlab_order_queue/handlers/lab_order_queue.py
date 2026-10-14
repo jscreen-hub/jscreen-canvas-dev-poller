@@ -160,9 +160,12 @@ class LabOrderQueueHandler(BaseHandler):
         if entry.queue_state in (READY, RELEASED):
             return []
         if entry.queue_state == DEFERRED:
+            eligible = (
+                entry.eligible_date.isoformat() if entry.eligible_date else "unknown"
+            )
             log.info(
                 f"[jlab_order_queue] queue decision: command={command_id} "
-                f"deferred, eligible={entry.eligible_date.isoformat()}"
+                f"deferred, eligible={eligible}"
             )
             return [
                 CommandValidationErrorEffect()
@@ -315,7 +318,8 @@ class LabOrderQueueHandler(BaseHandler):
     def _recompute_and_notify(
         self, patient_dbid: int, today: date, now: datetime
     ) -> None:
-        recompute_and_persist(patient_dbid, today, now)
+        tz = instance_timezone(self.environment)
+        recompute_and_persist(patient_dbid, today, now, tz)
         # Must agree with `apps/queue_app.py`'s `compute_notification_badge()`
         # on what the badge counts -- see badge.py.
         ApplicationNotificationBadge(GLOBAL_APP_IDENTIFIER).broadcast(

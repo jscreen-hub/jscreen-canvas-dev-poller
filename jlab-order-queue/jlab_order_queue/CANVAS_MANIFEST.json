@@ -1,8 +1,8 @@
 {
     "sdk_version": "0.1.4",
-    "plugin_version": "0.0.1",
+    "plugin_version": "0.0.3",
     "name": "jlab_order_queue",
-    "description": "Limits a physician to one ROUTINE JLab lab order per patient per local calendar day, deferring extras in FIFO order via a Command Validation block on the order's own Sign action. STAT/URGENT orders always bypass the queue. The physician always performs the actual signature -- this plugin never signs, cancels, or deletes a clinical order.",
+    "description": "Limits a physician to one ROUTINE JLab lab order per patient per local calendar day (FIFO), and additionally holds each subsequent order until one calendar day after the previous one was actually signed, via a Command Validation block on the order's own Sign action. STAT/URGENT orders always bypass the queue. The physician always performs the actual signature -- this plugin never signs, cancels, or deletes a clinical order.",
     "url_permissions": [],
     "custom_data": {
         "namespace": "jlab__order_queue",

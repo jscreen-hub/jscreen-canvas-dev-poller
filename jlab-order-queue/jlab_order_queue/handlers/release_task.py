@@ -71,7 +71,7 @@ class ReleaseDeferredOrders(CronTask):
         released = 0
         for patient_dbid in patient_dbids:
             try:
-                results = recompute_and_persist(patient_dbid, today, now)
+                results = recompute_and_persist(patient_dbid, today, now, tz)
             except Exception:
                 # Fail safely per patient: one patient's bad data must not
                 # stop every other patient's queue from being evaluated.
@@ -82,7 +82,7 @@ class ReleaseDeferredOrders(CronTask):
                 )
                 continue
             for result in results:
-                if result.became_available:
+                if result.became_available and result.eligible_date is not None:
                     released += 1
                     log.info(
                         f"[jlab_order_queue] release: command={result.command_id} "

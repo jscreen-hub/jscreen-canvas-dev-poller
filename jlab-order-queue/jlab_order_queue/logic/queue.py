@@ -3,8 +3,11 @@
 No Canvas SDK or Django imports on purpose: every rule in the spec --
 one routine JLab lab order per patient per local calendar day, FIFO,
 STAT/URGENT bypass, idempotent reprocessing, cancellation/date-rollover
-recalculation -- lives here as plain Python over plain dataclasses, so it
-is fully unit-testable without a database, an event bus, or a mocked SDK.
+recalculation, and (the latest rule) never letting the *next* order
+actually become available until one calendar day after the *previous* one
+was actually **signed** -- lives here as plain Python over plain
+dataclasses, so it is fully unit-testable without a database, an event bus,
+or a mocked SDK.
 
 `handlers/lab_order_queue.py` and `handlers/release_task.py` are thin
 adapters: they translate Canvas events and `JLabOrderQueueEntry` rows into
@@ -88,6 +91,14 @@ class QueuedOrder:
     `command_id` is the Canvas Command id (stable from staging onward --
     see DISCOVERY.md §"Canvas model involved" for why this, not LabOrder, is
     the identity the queue is keyed on).
+
+    `signed_date` is the local calendar date the order was actually signed,
+    already converted via `business_date`/the instance timezone by the
+    caller (this module stays timezone-agnostic, same as `today`) -- `None`
+    unless `queue_state == SIGNED`. It is what gates the *next* order in
+    this patient's FIFO chain from actually becoming available (see
+    `recompute_patient_queue`), independent of the calendar-slot
+    `eligible_date` projection below.
     """
 
     command_id: str
@@ -98,6 +109,7 @@ class QueuedOrder:
     priority: str = ROUTINE
     blocking_order_id: str | None = None
     defer_reason: str = ""
+    signed_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +143,23 @@ def _first_available_date(start: date, taken: set[date]) -> date:
     return candidate
 
 
+def _signing_gate_date(predecessor: "QueuedOrder | None") -> date | None:
+    """The earliest date `predecessor` allows the *next* order to become
+    available, or `None` if `predecessor` hasn't been signed yet (in which
+    case the next order cannot become available at any date yet).
+
+    `predecessor is None` (nothing ahead of this order in the FIFO chain)
+    imposes no signing gate at all -- represented by returning `date.min`
+    (handled by the caller) rather than `None`, so "no predecessor" and
+    "predecessor not yet signed" stay distinguishable.
+    """
+    if predecessor is None:
+        return date.min
+    if predecessor.queue_state != SIGNED or predecessor.signed_date is None:
+        return None
+    return predecessor.signed_date + timedelta(days=1)
+
+
 def recompute_patient_queue(
     entries: list[QueuedOrder], today: date
 ) -> list[RecomputeResult]:
@@ -143,28 +172,47 @@ def recompute_patient_queue(
     reprocessing and duplicate events safe (Step 8's "idempotent" and
     Step 2.8's "reprocessing" requirements).
 
-    Algorithm:
-      1. Entries already LOCKED (READY/RELEASED/SIGNED) or CANCELLED keep
-         their current eligible_date/state untouched -- a day already spent
-         or a row no longer in play is never reassigned.
-      2. Every other (DEFERRED, or a brand-new order being evaluated for the
-         first time) entry is sorted oldest-received-first -- FIFO -- and
-         each is assigned the earliest date >= today not already spent by a
-         LOCKED entry for this same patient.
-      3. An entry whose assigned date == today is promoted to READY (if it
-         was never available before) or RELEASED (if it was previously
-         DEFERRED and is only now reaching its day) -- "became_available"
-         marks exactly this transition, which is what the caller uses to
-         decide whether to flip the Canvas sign block off and stamp
-         `released_at`/fire a notification-badge update.
-      4. STAT/URGENT entries never occupy a slot and are always available;
-         see `is_bypass_priority`.
+    Two gates both have to pass before a pending order can actually become
+    available, and `eligible_date` always reflects the first (the original
+    calendar-slot projection), regardless of whether the second currently
+    blocks it:
 
-    Cancelled orders free their day immediately (they are simply excluded
-    from the "taken" set) -- this is also how "recalculate later queued
-    orders" (Step 4.5) and cancellation (Step 2.8) are satisfied: the next
-    call to this function with the cancelled row removed/marked CANCELLED
-    pulls every later DEFERRED row forward by however many days opened up.
+      1. **Calendar slot** (the original rule): entries already LOCKED
+         (READY/RELEASED/SIGNED) or CANCELLED keep their current
+         eligible_date/state untouched -- a day already spent or a row no
+         longer in play is never reassigned. Every other (DEFERRED, or a
+         brand-new order being evaluated for the first time) entry is
+         sorted oldest-received-first -- FIFO -- and each is assigned the
+         earliest date >= today not already spent by a LOCKED entry for
+         this same patient. This is purely a projection ("if signed
+         promptly, this is the earliest day it could run") and is computed
+         exactly as before, independent of anyone's actual signing.
+      2. **Signing gate** (the newer rule): on top of its calendar slot
+         having arrived, an entry also cannot become available until one
+         calendar day after the order immediately ahead of it in the FIFO
+         chain was *actually signed* -- an available-but-unsigned
+         predecessor does not start this clock, so the next order stays
+         DEFERRED (Sign button still blocked) even once its calendar slot
+         has passed, until the physician actually signs the one ahead of
+         it. This is what guarantees "signed on different days" -- an
+         order signed today can never let the next one become available
+         before tomorrow, however far in the past its calendar slot is.
+
+    An entry whose calendar slot has arrived AND whose signing gate has
+    passed is promoted to READY (if it was never available before) or
+    RELEASED (if it was previously DEFERRED) -- `became_available` marks
+    exactly this transition, which is what the caller uses to decide
+    whether to flip the Canvas sign block off and stamp `released_at`/fire
+    a notification-badge update. STAT/URGENT entries never occupy a slot or
+    a chain position and are always available; see `is_bypass_priority`.
+
+    Cancelled orders free their day and their chain position immediately
+    (excluded from both `taken` and the FIFO chain used for the signing
+    gate) -- this is also how "recalculate later queued orders" (Step 4.5)
+    and cancellation (Step 2.8) are satisfied: the next call to this
+    function with the cancelled row removed/marked CANCELLED pulls every
+    later DEFERRED row forward by however many days (and chain positions)
+    opened up.
     """
     results: list[RecomputeResult] = []
 
@@ -196,9 +244,10 @@ def recompute_patient_queue(
             )
             continue
         if entry.queue_state == CANCELLED:
-            # Frees its day -- excluded from `taken` -- but still reported so
-            # the caller can confirm it (e.g. a defensive re-check after a
-            # delete) rather than it silently vanishing from the results.
+            # Frees its day and chain position -- excluded from `taken` and
+            # from the FIFO chain -- but still reported so the caller can
+            # confirm it (e.g. a defensive re-check after a delete) rather
+            # than it silently vanishing from the results.
             results.append(
                 RecomputeResult(
                     command_id=entry.command_id,
@@ -226,24 +275,36 @@ def recompute_patient_queue(
             continue
         pending.append(entry)
 
+    # The full FIFO chain (locked + still-pending, excluding bypass/
+    # cancelled), used only to find each entry's immediately-preceding
+    # order for the signing gate -- a distinct concept from which calendar
+    # date that predecessor happens to occupy, so it stays correct even
+    # across a gap opened up by an earlier cancellation.
+    chain = sorted(
+        locked_or_terminal + pending, key=lambda e: (e.received_at, e.command_id)
+    )
+    predecessor_by_id: dict[str, QueuedOrder | None] = {}
+    previous: QueuedOrder | None = None
+    for e in chain:
+        predecessor_by_id[e.command_id] = previous
+        previous = e
+
     # FIFO: oldest `received_at` first. Ties broken by command_id so the
     # ordering is deterministic (and therefore idempotent) even if two
     # orders share a timestamp.
     pending.sort(key=lambda e: (e.received_at, e.command_id))
 
-    # Tracks who holds each date, so a deferred entry can name exactly which
-    # order it is queued behind -- the locked entry on the previous day, or
-    # (once we start assigning them below) an earlier pending entry in this
-    # same FIFO chain.
-    occupant_by_date: dict[date, str] = {
-        e.eligible_date: e.command_id for e in locked_or_terminal
-    }
-
     for entry in pending:
         assigned = _first_available_date(today, taken)
         taken.add(assigned)
         was_deferred = entry.queue_state == DEFERRED
-        if assigned <= today:
+
+        predecessor = predecessor_by_id.get(entry.command_id)
+        gate_date = _signing_gate_date(predecessor)
+        signing_gate_passed = gate_date is not None and gate_date <= today
+        calendar_slot_arrived = assigned <= today
+
+        if calendar_slot_arrived and signing_gate_passed:
             new_state = RELEASED if was_deferred else READY
             became_available = True
             reason = ""
@@ -251,13 +312,26 @@ def recompute_patient_queue(
         else:
             new_state = DEFERRED
             became_available = False
-            this_blocking_id = occupant_by_date.get(assigned - timedelta(days=1))
-            reason = (
-                "Another routine JLab lab order for this patient was "
-                f"already released today; this order becomes eligible on "
-                f"{assigned.isoformat()}."
-            )
-        occupant_by_date[assigned] = entry.command_id
+            this_blocking_id = predecessor.command_id if predecessor else None
+            reason_parts = []
+            if not calendar_slot_arrived:
+                reason_parts.append(
+                    "Another routine JLab lab order for this patient was "
+                    "already released today; this order becomes eligible "
+                    f"on {assigned.isoformat()}."
+                )
+            if gate_date is None:
+                reason_parts.append(
+                    "Another routine JLab lab order for this patient must "
+                    "be signed before this one can become available."
+                )
+            elif not signing_gate_passed and predecessor is not None:
+                reason_parts.append(
+                    "Another routine JLab lab order for this patient was "
+                    f"signed on {predecessor.signed_date.isoformat()}; this "  # type: ignore[union-attr]
+                    f"order cannot become available until {gate_date.isoformat()}."
+                )
+            reason = " ".join(reason_parts)
         results.append(
             RecomputeResult(
                 command_id=entry.command_id,

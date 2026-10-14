@@ -20,16 +20,19 @@ which has no opinion on what kind of id it is) is always
 from __future__ import annotations
 
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from jlab_order_queue.logic.queue import (
+    SIGNED,
     QueuedOrder,
     RecomputeResult,
+    business_date,
     recompute_patient_queue,
 )
 from jlab_order_queue.models import JLabOrderQueueEntry
 
 
-def _to_queued_order(entry: JLabOrderQueueEntry) -> QueuedOrder:
+def _to_queued_order(entry: JLabOrderQueueEntry, tz: ZoneInfo) -> QueuedOrder:
     return QueuedOrder(
         command_id=str(entry.command_id),
         patient_id=str(entry.patient_id),
@@ -37,11 +40,20 @@ def _to_queued_order(entry: JLabOrderQueueEntry) -> QueuedOrder:
         queue_state=entry.queue_state,
         eligible_date=entry.eligible_date,
         priority=entry.priority,
+        blocking_order_id=(
+            str(entry.blocking_order_id) if entry.blocking_order_id else None
+        ),
+        defer_reason=entry.defer_reason,
+        signed_date=(
+            business_date(entry.signed_at, tz)
+            if entry.queue_state == SIGNED and entry.signed_at is not None
+            else None
+        ),
     )
 
 
 def recompute_and_persist(
-    patient_dbid: int, today: date, now: datetime
+    patient_dbid: int, today: date, now: datetime, tz: ZoneInfo
 ) -> list[RecomputeResult]:
     """Recompute one patient's whole queue and write every row back.
 
@@ -56,7 +68,7 @@ def recompute_and_persist(
     """
     entries = list(JLabOrderQueueEntry.objects.filter(patient_id=patient_dbid))
     by_dbid = {entry.command_id: entry for entry in entries}
-    queued = [_to_queued_order(entry) for entry in entries]
+    queued = [_to_queued_order(entry, tz) for entry in entries]
 
     results = recompute_patient_queue(queued, today)
 
